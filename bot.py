@@ -11,6 +11,7 @@ class TulingWXBot(WXBot):
         WXBot.__init__(self)
 
         self.tuling_key = ""
+        self.robot_switch = True
 
         try:
             cf = ConfigParser.ConfigParser()
@@ -30,52 +31,125 @@ class TulingWXBot(WXBot):
             result = ''
             if respond['code'] == 100000:
                 result = respond['text'].replace('<br>', '  ')
+                result = result.replace(u'\xa0', u' ')
             elif respond['code'] == 200000:
                 result = respond['url']
+            elif respond['code'] == 302000:
+                for k in respond['list']:
+                    result = result + u"【" + k['source'] + u"】 " +\
+                        k['article'] + "\t" + k['detailurl'] + "\n"
             else:
                 result = respond['text'].replace('<br>', '  ')
+                result = result.replace(u'\xa0', u' ')
 
+            print '    ROBOT:', result
             return result
         else:
             return u"知道啦"
 
+    def auto_switch(self, msg):
+        msg_data = msg['content']['data']
+        stop_cmd = [u'退下', u'走开', u'关闭', u'关掉', u'休息', u'滚开']
+        start_cmd = [u'出来', u'启动', u'工作']
+        conclude_cmd = [u'总结']
+        clean_cmd = [u'清理记录']
+        if self.robot_switch:
+            for i in stop_cmd:
+                if i == msg_data:
+                    self.robot_switch = False
+                    self.send_msg_by_uid(u'机器人已关闭！', msg['to_user_id'])
+            if msg_data in conclude_cmd:
+                self.conclude(msg['to_user_id'])
+            if msg_data in clean_cmd:
+                self.clean_records(msg['to_user_id'])
+        else:
+            for i in start_cmd:
+                if i == msg_data:
+                    self.robot_switch = True
+                    self.send_msg_by_uid(u'机器人已开启！', msg['to_user_id'])
+
+    def record(self, name):
+        record_t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        record_d = time.strftime("%Y-%m-%d", time.localtime())
+        records = {}
+        if os.path.isfile('record.json'):
+            f = open('record.json', 'r')
+            records = json.load(f)
+            f.close()
+        record = {}
+        if records.has_key(name):
+            record = records[name]
+        record[record_d] = record_t
+        records[name] = record
+        with open('record.json', 'w') as f:
+            json.dump(records, f)
+
+    def conclude(self, uid):
+        records = {}
+        if os.path.isfile('record.json'):
+            f = open('record.json', 'r')
+            records = json.load(f)
+            f.close()
+        if len(records) <= 0:
+            self.send_msg_by_uid(u'没有记录！', uid)
+            return
+        reply = ''
+        for k, v in records.items():
+            reply += k + ': ' + str(len(v)) + '\n'
+        self.send_msg_by_uid(reply, uid)
+
+    def clean_records(self, uid):
+        records = {}
+        with open('record.json', 'w') as f:
+            json.dump(records, f)
+        self.send_msg_by_uid(u'清理完毕！', uid)
+
     def handle_msg_all(self, msg):
-        if msg['msg_type_id'] == 4 and msg['content']['type'] == 0:  # text message from contact
+        if not self.robot_switch and msg['msg_type_id'] != 1:
+            return
+        if msg['msg_type_id'] == 1 and msg['content']['type'] == 0:  # reply to self
+            self.auto_switch(msg)
+        elif msg['msg_type_id'] == 4 and msg['content']['type'] == 0:  # text message from contact
             self.send_msg_by_uid(self.tuling_auto_reply(msg['user']['id'], msg['content']['data']), msg['user']['id'])
-        elif msg['msg_type_id'] == 3:  # group message
-            if msg['content']['data'].find('@') >= 0:  # someone @ another
+        elif msg['msg_type_id'] == 3 and msg['content']['type'] == 0:  # group text message
+            if 'detail' in msg['content']:
                 my_names = self.get_group_member_name(msg['user']['id'], self.my_account['UserName'])
                 if my_names is None:
                     my_names = {}
-                if 'NickName' in self.my_account and len(self.my_account['NickName']) > 0:
+                if 'NickName' in self.my_account and self.my_account['NickName']:
                     my_names['nickname2'] = self.my_account['NickName']
-                if 'RemarkName' in self.my_account and len(self.my_account['RemarkName']) > 0:
+                if 'RemarkName' in self.my_account and self.my_account['RemarkName']:
                     my_names['remark_name2'] = self.my_account['RemarkName']
+
                 is_at_me = False
-                text_msg = ''
-                for _ in my_names:
-                    if msg['content']['data'].find('@'+my_names[_]) >= 0:
-                        is_at_me = True
-                        text_msg = msg['content']['data'].replace('@'+my_names[_], '').strip()
-                        break
-                if is_at_me:  # someone @ me
-		    src_name = msg['content']['user']['name']
-                    if src_name != '':
-                        reply = '@' + src_name + ' '
-                        if msg['content']['type'] == 0:  # text message
-                            if text_msg == u'打卡':
-                                reply += u'你很不错哟，继续加油！'
-                            else:
-                                reply += self.tuling_auto_reply(msg['content']['user']['id'], text_msg)
+                for detail in msg['content']['detail']:
+                    if detail['type'] == 'at':
+                        for k in my_names:
+                            if my_names[k] and my_names[k] == detail['value']:
+                                is_at_me = True
+                                break
+                if is_at_me:
+                    src_name = msg['content']['user']['name']
+                    reply = '@' + src_name + ' '
+                    if msg['content']['type'] == 0:  # text message
+                        if msg['content']['desc'] == u'打卡':
+                            self.record(src_name)
+                            reply += u'你很不错哟，继续加油！'
+                        elif msg['content']['desc'] == u'总结':
+                            self.conclude(msg['user']['id'])
+                            return
                         else:
-                            reply += u"对不起，只认字，其他杂七杂八的我都不认识，,,Ծ‸Ծ,,"
-                        self.send_msg_by_uid(reply, msg['user']['id'])
+                            reply += self.tuling_auto_reply(msg['content']['user']['id'], msg['content']['desc'])
+                    else:
+                        reply += u"对不起，只认字，其他杂七杂八的我都不认识，,,Ծ‸Ծ,,"
+                    self.send_msg_by_uid(reply, msg['user']['id'])
 
 
 def main():
     bot = TulingWXBot()
     bot.DEBUG = True
     bot.conf['qr'] = 'png'
+
     bot.run()
 
 
